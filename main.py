@@ -1,80 +1,60 @@
 import matplotlib.pyplot as plt
+import numpy as np
+import tensorflow as tf
 
-from tuning import *
+from tuning import tune_hyperparameters, train_best_model
 
 RANDOM_SEED = 42
-BATCH_FRACTION = 0.01
+DEFAULT_BATCH_FRACTION = 0.01
 
-LOOK_BACK = 60
+TUNING_LOOK_BACK = 60
+TUNING_MAX_TRIALS = 20
+TUNING_EXECUTIONS_PER_TRIAL = 1
+TUNING_EPOCHS = 10
 
-TICKER = "PFE"
+TRAINING_CONFIGS = [
+    {"look_back": 30, "epochs": 15},
+    {"look_back": 60, "epochs": 20},
+    {"look_back": 90, "epochs": 25},
+]
 
-TICKERS = ["AAPL", "ADBE", "AMD", "AMZN", "BA",
-           "BLK", "CRWD", "GD", "GME", "GOOG",
-           "GOOGL", "IBM", "INTC", "LMT", "META",
-           "MSFT", "NVDA", "SHOP", "TSLA", "ZS"]
+TICKERS = ["AAPL", "ABBV", "ADBE", "AMD", "AMZN",
+           "BA", "BABA", "BLK", "COST", "CRM",
+           "CRWD", "CVX", "DHR", "DIS", "GD",
+           "GME", "GOOG", "GOOGL", "GS", "HD",
+           "IBM", "INTC", "JPM", "KO", "LMT",
+           "MA", "META", "MRNA", "MSFT", "NFLX",
+           "NKE", "NOW", "NVDA", "ORCL", "PEP",
+           "PFE", "PG", "PYPL", "QCOM", "SHOP",
+           "T", "TMO", "TSLA", "TXN", "UNH",
+           "V", "VZ", "WMT", "XOM", "ZS"]
 
-def train_best_model(tuner, data_splits, scaling_info, look_back, epochs, verbose=True):
-    X_train, y_train, X_test, y_test = data_splits
-    min_val, max_val = scaling_info
-
-    best_hp = tuner.get_best_hyperparameters(num_trials=1)[0]
-
-    model = build_lstm_model(best_hp, input_shape=(look_back, 1))
-
-    batch_size = int(len(X_train) * BATCH_FRACTION)
-    batch_size = max(1, batch_size)
-
-    model.fit(X_train, y_train, batch_size=batch_size, epochs=epochs, verbose=verbose)
-
-    train_preds = model.predict(X_train, verbose=verbose)
-    test_preds = model.predict(X_test, verbose=verbose)
-
-    rmse_normalized = tf.sqrt(tf.reduce_mean(tf.square(test_preds - y_test))).numpy()
-
-    train_preds_original = inverse_scale(train_preds, min_val, max_val)
-    test_preds_original = inverse_scale(test_preds, min_val, max_val)
-    y_train_original = inverse_scale(y_train, min_val, max_val)
-    y_test_original = inverse_scale(y_test, min_val, max_val)
-
-    rmse_original = tf.sqrt(tf.reduce_mean(tf.square(test_preds_original - y_test_original))).numpy()
-
-    print("Best Hyperparameters:", best_hp.values)
-    print(f"Normalized RMSE: {rmse_normalized}")
-    print(f"Original   RMSE: {rmse_original}")
-
-    return model, (train_preds_original, test_preds_original, y_train_original, y_test_original)
+DEFAULT_TICKER = "PFE"
 
 
-def run_model(ticker, verbose=True):
-    tuner, data_splits, scaling_info = tune_hyperparameters(
-        ticker=ticker,
-        look_back=LOOK_BACK,
-        max_trials=20,
-        executions_per_trial=1,
-        epochs=10,
-        verbose=verbose
-    )
+def plot_results(ticker, results):
+    """
+    Plot the results of model training and evaluation.
 
-    final_model, preds = train_best_model(
-        tuner,
-        data_splits,
-        scaling_info,
-        LOOK_BACK,
-        epochs=10,
-        verbose=verbose
-    )
+    Args:
+        ticker (str): Stock ticker symbol.
+        results (dict): Dictionary containing model predictions, dates, and metrics.
+            Expected format:
+            {
+                'predictions': (train_preds_original, test_preds_original, y_train_original, y_test_original),
+                'dates': (train_dates, test_dates),
+                'metrics': {'original_rmse': float, ...}
+            }
 
-    train_preds_original, test_preds_original, y_train_original, y_test_original = preds
-
-    data_plot = yf.download(ticker, start="2020-01-01", end="2023-01-01", progress=False)
-    data_plot = data_plot[['Close']].dropna()
-
-    train_dates = data_plot.index[:len(y_train_original)]
-    test_dates = data_plot.index[-len(y_test_original):]
+    Returns:
+        None: Displays a plot showing real vs. predicted values for training and test data.
+    """
+    train_preds_original, test_preds_original, y_train_original, y_test_original = results['predictions']
+    train_dates, test_dates = results['dates']
+    metrics = results['metrics']
 
     plt.figure(figsize=(16, 8))
-    plt.title(f'LSTM Model - Hyperparameter Tuning - {ticker}')
+    plt.title(f'LSTM Model - {ticker} - RMSE: {metrics["original_rmse"]:.4f}')
     plt.xlabel('Date')
     plt.ylabel('Closing Price USD ($)')
 
@@ -88,13 +68,105 @@ def run_model(ticker, verbose=True):
     plt.show()
 
 
+def run_model(ticker, training_configs=None, verbose=True):
+    """
+    Run the complete model process for a given ticker.
+
+    The process includes:
+    1. Tuning hyperparameters
+    2. Training the best model with different look_back and epochs configurations
+
+    Args:
+        ticker (str): Stock ticker symbol.
+        training_configs (list, optional): List of dictionaries containing look_back and epochs values.
+            Defaults to TRAINING_CONFIGS.
+        verbose (bool, optional): Whether to print progress information. Defaults to True.
+
+    Returns:
+        dict: Results of the best model configuration including predictions, metrics, and configuration details.
+    """
+    if training_configs is None:
+        training_configs = TRAINING_CONFIGS
+
+    if verbose:
+        print(f"Tuning hyperparameters for {ticker}...")
+
+    tuner, data_info = tune_hyperparameters(
+        ticker=ticker,
+        look_back=TUNING_LOOK_BACK,
+        max_trials=TUNING_MAX_TRIALS,
+        executions_per_trial=TUNING_EXECUTIONS_PER_TRIAL,
+        epochs=TUNING_EPOCHS,
+        verbose=verbose
+    )
+
+    best_result = None
+    best_rmse = float('inf')
+
+    for i, config in enumerate(training_configs):
+        if verbose:
+            print(f"\nTraining configuration {i + 1}/{len(training_configs)}:")
+            print(f"Look-back: {config['look_back']}, Epochs: {config['epochs']}")
+
+        result = train_best_model(
+            tuner=tuner,
+            data_info=data_info,
+            train_look_back=config['look_back'],
+            train_epochs=config['epochs'],
+            batch_fraction=DEFAULT_BATCH_FRACTION,
+            verbose=verbose
+        )
+
+        if result['metrics']['original_rmse'] < best_rmse:
+            best_rmse = result['metrics']['original_rmse']
+            best_result = result
+
+    if verbose:
+        best_config = best_result['config']
+
+        print(f"\nBest configuration for {ticker}:")
+        print(f"Look-back: {best_config['look_back']}")
+        print(f"Epochs: {best_config['epochs']}")
+        print(f"Normalized RMSE: {best_result['metrics']['normalized_rmse']:.4f}")
+        print(f"Original RMSE: {best_rmse:.4f}")
+
+        plot_results(ticker, best_result)
+
+    return best_result
+
+
 def run_tests():
+    """
+    Run model for all tickers in the TICKERS list.
+
+    This function processes each ticker in the TICKERS list, trains a model for each,
+    and ranks the tickers based on the model's RMSE performance.
+
+    Returns:
+        dict: Dictionary mapping each ticker to its model results.
+    """
+    results = {}
+
     for ticker in TICKERS:
-        run_model(ticker, verbose=False)
+        print(f"\n{'=' * 50}")
+        print(f"Processing {ticker}")
+        print(f"{'=' * 50}")
+
+        result = run_model(ticker, verbose=True)
+        results[ticker] = result
+
+    ranked_tickers = sorted(results.keys(), key=lambda x: results[x]['metrics']['original_rmse'])
+
+    print("\nTickers ranked by RMSE (best to worst):")
+    for i, ticker in enumerate(ranked_tickers):
+        rmse = results[ticker]['metrics']['original_rmse']
+        print(f"{i + 1}. {ticker}: {rmse:.4f}")
+
+    return results
 
 
 if __name__ == '__main__':
     np.random.seed(RANDOM_SEED)
     tf.random.set_seed(RANDOM_SEED)
 
-    run_model(ticker=TICKER)
+    run_model(ticker=DEFAULT_TICKER)
