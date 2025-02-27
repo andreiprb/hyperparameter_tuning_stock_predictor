@@ -28,11 +28,8 @@ def build_lstm_model(hp, input_shape):
     model.add(LSTM(units=hp.Int('lstm_units_1', min_value=32, max_value=128, step=32), return_sequences=True))
     model.add(Dropout(hp.Float('dropout_rate_1', min_value=0.1, max_value=0.5, step=0.1)))
 
-    model.add(LSTM(units=hp.Int('lstm_units_2', min_value=64, max_value=256, step=32), return_sequences=True))
+    model.add(LSTM(units=hp.Int('lstm_units_2', min_value=32, max_value=128, step=32), return_sequences=False))
     model.add(Dropout(hp.Float('dropout_rate_2', min_value=0.1, max_value=0.5, step=0.1)))
-
-    model.add(LSTM(units=hp.Int('lstm_units_3', min_value=32, max_value=128, step=32), return_sequences=False))
-    model.add(Dropout(hp.Float('dropout_rate_3', min_value=0.1, max_value=0.5, step=0.1)))
 
     model.add(Dense(units=hp.Int('dense_units', min_value=20, max_value=80, step=20), activation='relu'))
     model.add(Dense(1))
