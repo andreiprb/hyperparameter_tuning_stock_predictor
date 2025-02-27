@@ -5,8 +5,9 @@ from keras.api.layers import LSTM, Dense, Input, Dropout
 from keras.api.optimizers import Adam
 
 import keras_tuner as kt
+import tensorflow as tf
 
-from utility import *
+from utility import min_max_scale, inverse_scale, create_dataset, split_train_test
 
 TEST_SIZE = 0.05
 
@@ -54,9 +55,10 @@ def tune_hyperparameters(ticker, look_back, max_trials, executions_per_trial, ep
         verbose (bool, optional): Whether to print progress information. Defaults to True.
 
     Returns:
-        tuple: (tuner, data_info) where:
+        tuple: (tuner, (data_splits, scaling_info)) where:
             tuner: The tuner object with best hyperparameters found
-            data_info: Dictionary containing data-related information needed for training
+            data_splits: Tuple of (X_train, y_train, X_test, y_test)
+            scaling_info: Tuple of (min_val, max_val)
     """
     data = yf.download(ticker, start="2020-01-01", end="2023-01-01", progress=verbose)
     data = data[['Close']].dropna()
@@ -70,57 +72,8 @@ def tune_hyperparameters(ticker, look_back, max_trials, executions_per_trial, ep
     X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], 1)
     X_test = X_test.reshape(X_test.shape[0], X_test.shape[1], 1)
 
-    class LSTMHyperModel(kt.HyperModel):
-        """
-        Hypermodel class for LSTM model, enabling batch size tuning.
-        """
-
-        def __init__(self, input_shape):
-            """
-            Initialize the hypermodel with a specific input shape.
-
-            Args:
-                input_shape (tuple): Shape of the input data.
-            """
-            self.input_shape = input_shape
-
-        def build(self, hp):
-            """
-            Build the model with the given hyperparameters.
-
-            Args:
-                hp (HyperParameters): Keras Tuner hyperparameter object.
-
-            Returns:
-                Sequential: Compiled Keras model.
-            """
-            return build_lstm_model(hp, self.input_shape)
-
-        def fit(self, hp, model, x, y, validation_data=None, **kwargs):
-            """
-            Custom fit method that includes batch size as a hyperparameter.
-
-            Args:
-                hp (HyperParameters): Keras Tuner hyperparameter object.
-                model (Model): Keras model to train.
-                x (array): Input training data.
-                y (array): Target training data.
-                validation_data (tuple, optional): Validation data tuple. Defaults to None.
-
-            Returns:
-                History: Training history.
-            """
-            batch_size = hp.Choice('batch_size', values=[16, 32, 64, 128, 256])
-
-            return model.fit(
-                x, y,
-                batch_size=batch_size,
-                validation_data=validation_data,
-                **kwargs
-            )
-
     tuner = kt.RandomSearch(
-        LSTMHyperModel(input_shape=(look_back, 1)),
+        lambda hp: build_lstm_model(hp, input_shape=(look_back, 1)),
         objective='val_loss',
         max_trials=max_trials,
         executions_per_trial=executions_per_trial,
@@ -135,74 +88,43 @@ def tune_hyperparameters(ticker, look_back, max_trials, executions_per_trial, ep
         verbose=verbose
     )
 
-    data_info = {
-        'raw_data': data,
-        'normalized_data': normalized_data,
-        'scaling_info': (min_val, max_val),
-        'ticker': ticker
-    }
-
+    data_info = ((X_train, y_train, X_test, y_test), (min_val, max_val))
     return tuner, data_info
 
 
-def prepare_data_with_lookback(normalized_data, look_back):
+def train_best_model(tuner, data_splits, scaling_info, look_back, epochs, verbose=True):
     """
-    Prepare dataset with a specific look_back period.
-
-    Args:
-        normalized_data (array): Normalized input data.
-        look_back (int): Number of previous time steps to use as input features.
-
-    Returns:
-        tuple: (X_train, y_train, X_test, y_test) prepared data arrays.
-    """
-    X, y = create_dataset(normalized_data, look_back)
-
-    X_train, y_train, X_test, y_test = split_train_test(X, y, TEST_SIZE)
-
-    X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], 1)
-    X_test = X_test.reshape(X_test.shape[0], X_test.shape[1], 1)
-
-    return X_train, y_train, X_test, y_test
-
-
-def train_best_model(tuner, data_info, train_look_back, train_epochs, batch_fraction=0.01, verbose=True):
-    """
-    Train the best model found by the tuner with a potentially different look_back and epochs.
+    Train the best model found by the tuner with the specified look_back and epochs.
 
     Args:
         tuner (RandomSearch): Keras Tuner object with best hyperparameters.
-        data_info (dict): Dictionary containing data-related information.
-        train_look_back (int): Number of previous time steps to use as input features for training.
-        train_epochs (int): Number of training epochs.
-        batch_fraction (float, optional): Fraction of training data to use for batch size calculation.
-            Only used as fallback if batch size not in hyperparameters. Defaults to 0.01.
+        data_splits (tuple): Tuple of (X_train, y_train, X_test, y_test).
+        scaling_info (tuple): Tuple of (min_val, max_val) for inverse scaling.
+        look_back (int): Number of previous time steps to use as input features.
+        epochs (int): Number of training epochs.
         verbose (bool, optional): Whether to print progress information. Defaults to True.
 
     Returns:
-        dict: Results dictionary containing model, predictions, dates, metrics, and configuration details.
+        tuple: (normalized_rmse, original_rmse, model, predictions) where:
+            normalized_rmse: RMSE calculated using normalized values
+            original_rmse: RMSE calculated using original scale values
+            model: Trained Keras model
+            predictions: Tuple of (train_preds_original, test_preds_original, y_train_original, y_test_original)
     """
-    normalized_data = data_info['normalized_data']
-    min_val, max_val = data_info['scaling_info']
-    ticker = data_info['ticker']
-
-    X_train, y_train, X_test, y_test = prepare_data_with_lookback(normalized_data, train_look_back)
+    X_train, y_train, X_test, y_test = data_splits
+    min_val, max_val = scaling_info
 
     best_hp = tuner.get_best_hyperparameters(num_trials=1)[0]
 
-    model = build_lstm_model(best_hp, input_shape=(train_look_back, 1))
+    model = build_lstm_model(best_hp, input_shape=(look_back, 1))
 
-    if 'batch_size' in best_hp.values:
-        batch_size = best_hp.values['batch_size']
-        if verbose:
-            print(f"Using tuned batch size: {batch_size}")
-    else:
-        batch_size = int(len(X_train) * batch_fraction)
-        batch_size = max(1, batch_size)
-        if verbose:
-            print(f"Using calculated batch size: {batch_size}")
+    batch_size = int(len(X_train) * 0.01)  # Using a fixed batch fraction of 0.01
+    batch_size = max(1, batch_size)
 
-    history = model.fit(X_train, y_train, batch_size=batch_size, epochs=train_epochs, verbose=verbose)
+    if verbose:
+        print("Best Hyperparameters:", best_hp.values)
+
+    model.fit(X_train, y_train, batch_size=batch_size, epochs=epochs, verbose=verbose)
 
     train_preds = model.predict(X_train, verbose=verbose)
     test_preds = model.predict(X_test, verbose=verbose)
@@ -217,32 +139,7 @@ def train_best_model(tuner, data_info, train_look_back, train_epochs, batch_frac
     rmse_original = tf.sqrt(tf.reduce_mean(tf.square(test_preds_original - y_test_original))).numpy()
 
     if verbose:
-        print("Best Hyperparameters:", best_hp.values)
-        print(f"Look-back period: {train_look_back}")
-        print(f"Training epochs: {train_epochs}")
         print(f"Normalized RMSE: {rmse_normalized}")
         print(f"Original RMSE: {rmse_original}")
 
-    raw_data = data_info['raw_data']
-    data_dates = raw_data.index
-
-    train_dates = data_dates[:len(y_train_original)]
-    test_dates = data_dates[-len(y_test_original):]
-
-    results = {
-        'model': model,
-        'predictions': (train_preds_original, test_preds_original, y_train_original, y_test_original),
-        'dates': (train_dates, test_dates),
-        'metrics': {'normalized_rmse': rmse_normalized, 'original_rmse': rmse_original},
-        'hyperparameters': best_hp.values
-    }
-
-    results['config'] = {
-        'look_back': train_look_back,
-        'epochs': train_epochs,
-    }
-
-    if 'history' in locals():
-        results['history'] = history.history
-
-    return results
+    return rmse_normalized, rmse_original, model, (train_preds_original, test_preds_original, y_train_original, y_test_original)

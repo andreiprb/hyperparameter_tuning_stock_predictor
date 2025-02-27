@@ -10,19 +10,16 @@ from datetime import datetime
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
 
-from tuning import tune_hyperparameters, build_lstm_model
+from tuning import build_lstm_model
 from utility import min_max_scale, inverse_scale, create_dataset
-from simple_training import TICKERS, RANDOM_SEED, plot_results as plot_individual_results
+from simple_training import TICKERS, RANDOM_SEED, LOOK_BACK, TRAINING_EPOCHS, TUNING_EPOCHS, run_model
 
 # Constants
 TRAIN_TICKERS_COUNT = 45  # Use 45 stocks for training (90% of 50)
 TEST_SIZE = 0.05
-LOOK_BACK = 60
 TUNING_MAX_TRIALS = 15
 TUNING_EXECUTIONS_PER_TRIAL = 1
-TUNING_EPOCHS = 10
-TRAINING_EPOCHS = 20
-BATCH_SIZE = 32
+BATCH_SIZE = 32  # Fixed batch size, not tuned
 START_DATE = "2020-01-01"
 END_DATE = "2023-01-01"
 
@@ -142,15 +139,12 @@ def combine_datasets(data_list):
     return X_combined, y_combined
 
 
-def train_base_model(train_tickers, tuning_config, training_config, tuning_fraction=TUNING_DATA_FRACTION, verbose=True):
+def train_base_model(train_tickers, verbose=True):
     """
     Train a base model on data from multiple tickers, using a subset for hyperparameter tuning.
 
     Args:
         train_tickers (list): List of ticker symbols to use for training.
-        tuning_config (dict): Configuration for hyperparameter tuning.
-        training_config (dict): Configuration for model training.
-        tuning_fraction (float): Fraction of data to use for hyperparameter tuning.
         verbose (bool, optional): Whether to print progress information. Defaults to True.
 
     Returns:
@@ -160,9 +154,9 @@ def train_base_model(train_tickers, tuning_config, training_config, tuning_fract
     # Prepare combined data for all training tickers
     combined_data_info = prepare_combined_data(
         tickers=train_tickers,
-        start_date=training_config['start_date'],
-        end_date=training_config['end_date'],
-        look_back=tuning_config['look_back'],
+        start_date=START_DATE,
+        end_date=END_DATE,
+        look_back=LOOK_BACK,  # Use fixed LOOK_BACK from simple_training
         verbose=verbose
     )
 
@@ -173,60 +167,43 @@ def train_base_model(train_tickers, tuning_config, training_config, tuning_fract
         print(f"Combined dataset shape: X={X_combined.shape}, y={y_combined.shape}")
 
     # For hyperparameter tuning, use only a subset of the data
-    if tuning_fraction < 1.0:
-        # Create a subset for tuning
-        X_tuning, _, y_tuning, _ = train_test_split(
-            X_combined, y_combined,
-            train_size=tuning_fraction,
-            shuffle=True,
-            random_state=RANDOM_SEED
-        )
+    X_tune, _, y_tune, _ = train_test_split(
+        X_combined, y_combined,
+        train_size=TUNING_DATA_FRACTION,
+        shuffle=True,
+        random_state=RANDOM_SEED
+    )
 
-        if verbose:
-            print(f"Using {tuning_fraction * 100:.1f}% of combined data for hyperparameter tuning")
-            print(f"Tuning dataset shape: X={X_tuning.shape}, y={y_tuning.shape}")
-    else:
-        # Use all data if fraction is 1.0
-        X_tuning, y_tuning = X_combined, y_combined
+    if verbose:
+        print(f"Using {TUNING_DATA_FRACTION * 100:.1f}% of combined data for hyperparameter tuning")
+        print(f"Tuning dataset shape: X={X_tune.shape}, y={y_tune.shape}")
 
     # Split tuning data into training and validation sets
     X_tune_train, X_tune_val, y_tune_train, y_tune_val = train_test_split(
-        X_tuning, y_tuning, test_size=TEST_SIZE, shuffle=True, random_state=RANDOM_SEED
+        X_tune, y_tune, test_size=TEST_SIZE, shuffle=True, random_state=RANDOM_SEED
     )
 
     if verbose:
         print("Tuning hyperparameters on subset of combined dataset...")
 
     # Create a tuner for the combined dataset
-    tuner_class = tuning_config.get('tuner_class', 'RandomSearch')
-    input_shape = (tuning_config['look_back'], 1)
+    input_shape = (LOOK_BACK, 1)
 
-    if tuner_class == 'RandomSearch':
-        tuner = kt.RandomSearch(
-            lambda hp: build_lstm_model(hp, input_shape),
-            objective='val_loss',
-            max_trials=tuning_config['max_trials'],
-            executions_per_trial=tuning_config['executions_per_trial'],
-            directory='hyper_tuning',
-            project_name='combined_lstm_tuning'
-        )
-    else:
-        # Default to RandomSearch if invalid tuner class
-        tuner = kt.RandomSearch(
-            lambda hp: build_lstm_model(hp, input_shape),
-            objective='val_loss',
-            max_trials=tuning_config['max_trials'],
-            executions_per_trial=tuning_config['executions_per_trial'],
-            directory='hyper_tuning',
-            project_name='combined_lstm_tuning'
-        )
+    tuner = kt.RandomSearch(
+        lambda hp: build_lstm_model(hp, input_shape),
+        objective='val_loss',
+        max_trials=TUNING_MAX_TRIALS,
+        executions_per_trial=TUNING_EXECUTIONS_PER_TRIAL,
+        directory='hyper_tuning',
+        project_name='combined_lstm_tuning'
+    )
 
     # Search for best hyperparameters on the subset
     tuner.search(
         X_tune_train, y_tune_train,
         validation_data=(X_tune_val, y_tune_val),
-        epochs=tuning_config['epochs'],
-        batch_size=training_config['batch_size'],
+        epochs=TUNING_EPOCHS,
+        batch_size=BATCH_SIZE,  # Use fixed batch size
         verbose=verbose
     )
 
@@ -247,8 +224,8 @@ def train_base_model(train_tickers, tuning_config, training_config, tuning_fract
 
     history = model.fit(
         X_combined, y_combined,
-        batch_size=training_config['batch_size'],
-        epochs=training_config['epochs'],
+        batch_size=BATCH_SIZE,  # Use fixed batch size
+        epochs=TRAINING_EPOCHS,  # Use TRAINING_EPOCHS from simple_training
         validation_split=TEST_SIZE,
         verbose=verbose
     )
@@ -298,14 +275,13 @@ def plot_transfer_results(ticker, results, save=False):
     plt.show()
 
 
-def evaluate_on_test_tickers(model, test_tickers, combined_data_info, verbose=True):
+def evaluate_on_test_tickers(model, test_tickers, verbose=True):
     """
     Evaluate the trained model on test tickers not used during training.
 
     Args:
         model (Model): Trained Keras model.
         test_tickers (list): List of ticker symbols to use for testing.
-        combined_data_info (dict): Information about the combined dataset.
         verbose (bool, optional): Whether to print progress information. Defaults to True.
 
     Returns:
@@ -336,7 +312,7 @@ def evaluate_on_test_tickers(model, test_tickers, combined_data_info, verbose=Tr
         normalized_data, min_val, max_val = min_max_scale(close_data)
 
         # Create sequences
-        X, y = create_dataset(normalized_data, LOOK_BACK)
+        X, y = create_dataset(normalized_data, LOOK_BACK)  # Use fixed LOOK_BACK
         X = X.reshape(X.shape[0], X.shape[1], 1)
 
         # Split into train and test sets
@@ -408,8 +384,6 @@ def compare_with_individual_models(test_tickers, test_results, verbose=True):
     Returns:
         dict: Comparison results.
     """
-    from simple_training import run_model
-
     comparison = {}
 
     for ticker in test_tickers:
@@ -424,19 +398,18 @@ def compare_with_individual_models(test_tickers, test_results, verbose=True):
         # Train individual model
         individual_result = run_model(
             ticker=ticker,
-            training_configs=[{"look_back": LOOK_BACK, "epochs": TRAINING_EPOCHS}],
             verbose=verbose
         )
 
         # Get transfer learning result
         transfer_result = test_results[ticker]
 
-        # Compare RMSEs
+        # Extract predictions and metrics
         transfer_rmse = transfer_result['metrics']['original_rmse']
         individual_rmse = individual_result['metrics']['original_rmse']
         improvement = (individual_rmse - transfer_rmse) / individual_rmse * 100
 
-        # Get normalized RMSEs
+        # Extract normalized RMSEs
         transfer_norm_rmse = transfer_result['metrics']['normalized_rmse']
         individual_norm_rmse = individual_result['metrics']['normalized_rmse']
         norm_improvement = (individual_norm_rmse - transfer_norm_rmse) / individual_norm_rmse * 100
@@ -460,8 +433,8 @@ def compare_with_individual_models(test_tickers, test_results, verbose=True):
 
         # Save the individual model's plot as well
         try:
-            # Access the individual model's predictions and dates
-            train_preds, test_preds, y_train, y_test = individual_result['predictions']
+            # Get the individual model plot data
+            train_preds_original, test_preds_original, y_train_original, y_test_original = individual_result['predictions']
             train_dates, test_dates = individual_result['dates']
 
             # Create a new figure
@@ -471,11 +444,11 @@ def compare_with_individual_models(test_tickers, test_results, verbose=True):
             plt.xlabel('Date')
             plt.ylabel('Closing Price USD ($)')
 
-            plt.plot(train_dates, y_train, color='blue', label='Real - Train')
-            plt.plot(train_dates, train_preds, color='orange', label='Predicted - Train')
+            plt.plot(train_dates, y_train_original, color='blue', label='Real - Train')
+            plt.plot(train_dates, train_preds_original, color='orange', label='Predicted - Train')
 
-            plt.plot(test_dates, y_test, color='green', label='Real - Test')
-            plt.plot(test_dates, test_preds, color='red', label='Predicted - Test')
+            plt.plot(test_dates, y_test_original, color='green', label='Real - Test')
+            plt.plot(test_dates, test_preds_original, color='red', label='Predicted - Test')
 
             plt.legend()
             plt.grid(True, alpha=0.3)
@@ -506,7 +479,7 @@ def compare_with_individual_models(test_tickers, test_results, verbose=True):
     return comparison
 
 
-def run_transfer_learning(tuning_fraction=TUNING_DATA_FRACTION):
+def run_transfer_learning():
     """
     Run the complete transfer learning process.
 
@@ -515,8 +488,7 @@ def run_transfer_learning(tuning_fraction=TUNING_DATA_FRACTION):
     2. Uses 90% of tickers (all data) for model training
     3. Tests on 10% of tickers
 
-    Args:
-        tuning_fraction (float): Fraction of data to use for hyperparameter tuning.
+    Only model architecture hyperparameters are tuned, not look_back or batch_size.
 
     Returns:
         tuple: (base_model, train_tickers, test_tickers, test_results)
@@ -537,82 +509,19 @@ def run_transfer_learning(tuning_fraction=TUNING_DATA_FRACTION):
     print(f"Train tickers: {train_tickers}")
     print(f"Test tickers: {test_tickers}")
 
-    # Prepare data for training tickers only (not all tickers)
-    train_data_info = prepare_combined_data(
-        tickers=train_tickers,  # Use only training tickers
-        start_date=START_DATE,
-        end_date=END_DATE,
-        look_back=LOOK_BACK,
-        verbose=True
-    )
-
-    # Combine datasets for training tickers only
-    X_train_all, y_train_all = combine_datasets(train_data_info['data'])
-    print(f"Full dataset from training tickers: X={X_train_all.shape}, y={y_train_all.shape}")
-
-    # For hyperparameter tuning, use only a subset of the training data
-    X_tune_subset, _, y_tune_subset, _ = train_test_split(
-        X_train_all, y_train_all,
-        train_size=tuning_fraction,
-        shuffle=True,
-        random_state=RANDOM_SEED
-    )
-
-    print(f"Using {tuning_fraction * 100:.1f}% of training tickers' data for hyperparameter tuning")
-    print(f"Tuning dataset shape: X={X_tune_subset.shape}, y={y_tune_subset.shape}")
-
-    # Split tuning data into training and validation sets
-    X_tune_train, X_tune_val, y_tune_train, y_tune_val = train_test_split(
-        X_tune_subset, y_tune_subset, test_size=TEST_SIZE, shuffle=True, random_state=RANDOM_SEED
-    )
-
-    print("Tuning hyperparameters...")
-
-    # Create a tuner for the combined dataset
-    tuner = kt.RandomSearch(
-        lambda hp: build_lstm_model(hp, (LOOK_BACK, 1)),
-        objective='val_loss',
-        max_trials=TUNING_MAX_TRIALS,
-        executions_per_trial=TUNING_EXECUTIONS_PER_TRIAL,
-        directory='hyper_tuning',
-        project_name='_full_model_tuning'
-    )
-
-    # Search for best hyperparameters on the subset
-    tuner.search(
-        X_tune_train, y_tune_train,
-        validation_data=(X_tune_val, y_tune_val),
-        epochs=TUNING_EPOCHS,
-        batch_size=BATCH_SIZE,
-        verbose=True
-    )
-
-    best_hp = tuner.get_best_hyperparameters(num_trials=1)[0]
-    print("\nBest Hyperparameters:")
-    for param, value in best_hp.values.items():
-        print(f"{param}: {value}")
-
-    # Train final model on full training data
-    model = build_lstm_model(best_hp, (LOOK_BACK, 1))
-    print("\nTraining final model on the FULL training dataset...")
-    history = model.fit(
-        X_train_all, y_train_all,
-        batch_size=BATCH_SIZE,
-        epochs=TRAINING_EPOCHS,
-        validation_split=TEST_SIZE,
-        verbose=True
-    )
+    # Train the base model
+    print("Training base model on combined data from training tickers...")
+    base_model, combined_data_info = train_base_model(train_tickers, verbose=True)
 
     # Evaluate on test tickers
     print("\nEvaluating on test tickers...")
     test_results = evaluate_on_test_tickers(
-        model=model,
+        model=base_model,
         test_tickers=test_tickers,
-        combined_data_info=train_data_info,
         verbose=True
     )
 
-    return model, train_tickers, test_tickers, test_results
+    return base_model, train_tickers, test_tickers, test_results
 
 
 if __name__ == '__main__':
@@ -628,9 +537,7 @@ if __name__ == '__main__':
 
     try:
         # Run transfer learning
-        base_model, train_tickers, test_tickers, test_results = run_transfer_learning(
-            tuning_fraction=TUNING_DATA_FRACTION
-        )
+        base_model, train_tickers, test_tickers, test_results = run_transfer_learning()
 
         # Compare with individual models
         compare_with_individual_models(test_tickers, test_results)

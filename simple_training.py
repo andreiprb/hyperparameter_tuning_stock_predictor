@@ -1,22 +1,19 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
+import yfinance as yf
 
 from tuning import tune_hyperparameters, train_best_model
 
 RANDOM_SEED = 42
 DEFAULT_BATCH_FRACTION = 0.01
 
-TUNING_LOOK_BACK = 60
-TUNING_MAX_TRIALS = 120
-TUNING_EXECUTIONS_PER_TRIAL = 1
+LOOK_BACK = 60
 TUNING_EPOCHS = 10
+TRAINING_EPOCHS = 20
 
-TRAINING_CONFIGS = [
-    {"look_back": 30, "epochs": 15},
-    {"look_back": 60, "epochs": 20},
-    {"look_back": 90, "epochs": 25},
-]
+TUNING_MAX_TRIALS = 20
+TUNING_EXECUTIONS_PER_TRIAL = 1
 
 TICKERS = ["AAPL", "ABBV", "ADBE", "AMD", "AMZN",
            "BA", "BABA", "BLK", "COST", "CRM",
@@ -53,6 +50,18 @@ def plot_results(ticker, results):
     train_dates, test_dates = results['dates']
     metrics = results['metrics']
 
+    # Ensure shapes match by trimming if necessary
+    min_train_len = min(len(train_dates), len(y_train_original))
+    min_test_len = min(len(test_dates), len(y_test_original))
+
+    train_dates = train_dates[:min_train_len]
+    y_train_original = y_train_original[:min_train_len]
+    train_preds_original = train_preds_original[:min_train_len]
+
+    test_dates = test_dates[:min_test_len]
+    y_test_original = y_test_original[:min_test_len]
+    test_preds_original = test_preds_original[:min_test_len]
+
     plt.figure(figsize=(16, 8))
     plt.title(f'LSTM Model - {ticker} - RMSE: {metrics["original_rmse"]:.4f}')
     plt.xlabel('Date')
@@ -68,71 +77,77 @@ def plot_results(ticker, results):
     plt.show()
 
 
-def run_model(ticker, training_configs=None, verbose=True):
+def run_model(ticker, verbose=True):
     """
     Run the complete model process for a given ticker.
 
     The process includes:
     1. Tuning hyperparameters
-    2. Training the best model with different look_back and epochs configurations
+    2. Training the best model with fixed look_back and epochs configurations
 
     Args:
         ticker (str): Stock ticker symbol.
-        training_configs (list, optional): List of dictionaries containing look_back and epochs values.
-            Defaults to TRAINING_CONFIGS.
         verbose (bool, optional): Whether to print progress information. Defaults to True.
 
     Returns:
         dict: Results of the best model configuration including predictions, metrics, and configuration details.
     """
-    if training_configs is None:
-        training_configs = TRAINING_CONFIGS
 
     if verbose:
         print(f"Tuning hyperparameters for {ticker}...")
 
     tuner, data_info = tune_hyperparameters(
         ticker=ticker,
-        look_back=TUNING_LOOK_BACK,
+        look_back=LOOK_BACK,
         max_trials=TUNING_MAX_TRIALS,
         executions_per_trial=TUNING_EXECUTIONS_PER_TRIAL,
         epochs=TUNING_EPOCHS,
         verbose=verbose
     )
 
-    best_result = None
-    best_rmse = float('inf')
+    # Use the fixed look_back and training_epochs parameters
+    rmse_normalized, rmse_original, model, predictions = train_best_model(
+        tuner=tuner,
+        data_splits=data_info[0],
+        scaling_info=data_info[1],
+        look_back=LOOK_BACK,
+        epochs=TRAINING_EPOCHS,
+        verbose=verbose
+    )
 
-    for i, config in enumerate(training_configs):
-        if verbose:
-            print(f"\nTraining configuration {i + 1}/{len(training_configs)}:")
-            print(f"Look-back: {config['look_back']}, Epochs: {config['epochs']}")
+    # Get data dates
+    data = yf.download(ticker, start="2020-01-01", end="2023-01-01", progress=False)
+    data = data[['Close']].dropna()
 
-        result = train_best_model(
-            tuner=tuner,
-            data_info=data_info,
-            train_look_back=config['look_back'],
-            train_epochs=config['epochs'],
-            batch_fraction=DEFAULT_BATCH_FRACTION,
-            verbose=verbose
-        )
+    # Extract the actual training and test data sizes
+    X_train, y_train, X_test, y_test = data_info[0]
 
-        if result['metrics']['original_rmse'] < best_rmse:
-            best_rmse = result['metrics']['original_rmse']
-            best_result = result
+    # Get dates that match exactly with the number of predictions
+    train_preds_original, test_preds_original, y_train_original, y_test_original = predictions
+
+    # Get indices that match the actual data points used in training/testing
+    train_indices = range(LOOK_BACK, LOOK_BACK + len(y_train))
+    test_indices = range(LOOK_BACK + len(y_train), LOOK_BACK + len(y_train) + len(y_test))
+
+    # Get the dates corresponding to these indices
+    train_dates = data.index[train_indices]
+    test_dates = data.index[test_indices]
+
+    # Format final results
+    result = {
+        'predictions': predictions,
+        'dates': (train_dates, test_dates),
+        'metrics': {
+            'normalized_rmse': rmse_normalized,
+            'original_rmse': rmse_original
+        },
+        'model': model
+    }
 
     if verbose:
-        best_config = best_result['config']
+        plot_results(ticker, result)
 
-        print(f"\nBest configuration for {ticker}:")
-        print(f"Look-back: {best_config['look_back']}")
-        print(f"Epochs: {best_config['epochs']}")
-        print(f"Normalized RMSE: {best_result['metrics']['normalized_rmse']:.4f}")
-        print(f"Original RMSE: {best_rmse:.4f}")
-
-        plot_results(ticker, best_result)
-
-    return best_result
+    return result
 
 
 def run_tests():
