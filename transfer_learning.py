@@ -12,7 +12,7 @@ from sklearn.model_selection import train_test_split
 
 from tuning import tune_hyperparameters, build_lstm_model
 from utility import min_max_scale, inverse_scale, create_dataset
-from main import TICKERS, RANDOM_SEED, plot_results as plot_individual_results
+from simple_training import TICKERS, RANDOM_SEED, plot_results as plot_individual_results
 
 # Constants
 TRAIN_TICKERS_COUNT = 45  # Use 45 stocks for training (90% of 50)
@@ -38,7 +38,7 @@ def setup_logging():
     os.makedirs(results_dir, exist_ok=True)
 
     # Create log file
-    log_file = os.path.join(results_dir, "results.txt")
+    log_file = os.path.join(results_dir, "_results.txt")
 
     return log_file
 
@@ -408,7 +408,7 @@ def compare_with_individual_models(test_tickers, test_results, verbose=True):
     Returns:
         dict: Comparison results.
     """
-    from main import run_model
+    from simple_training import run_model
 
     comparison = {}
 
@@ -511,7 +511,7 @@ def run_transfer_learning(tuning_fraction=TUNING_DATA_FRACTION):
     Run the complete transfer learning process.
 
     This function:
-    1. Uses 30% of data from all tickers for hyperparameter tuning
+    1. Uses 30% of data from the 45 training tickers for hyperparameter tuning
     2. Uses 90% of tickers (all data) for model training
     3. Tests on 10% of tickers
 
@@ -537,57 +537,29 @@ def run_transfer_learning(tuning_fraction=TUNING_DATA_FRACTION):
     print(f"Train tickers: {train_tickers}")
     print(f"Test tickers: {test_tickers}")
 
-    # Configuration for tuning and training
-    tuning_config = {
-        'look_back': LOOK_BACK,
-        'max_trials': TUNING_MAX_TRIALS,
-        'executions_per_trial': TUNING_EXECUTIONS_PER_TRIAL,
-        'epochs': TUNING_EPOCHS,
-        'tuner_class': 'RandomSearch'
-    }
-
-    training_config = {
-        'batch_size': BATCH_SIZE,
-        'epochs': TRAINING_EPOCHS,
-        'start_date': START_DATE,
-        'end_date': END_DATE
-    }
-
-    # Step 1: Prepare hyperparameter tuning data from ALL tickers
-    print("\n" + "=" * 50)
-    print(f"HYPERPARAMETER TUNING")
-    print(f"Using ALL {len(TICKERS)} tickers (100% of tickers)")
-    print(f"Sampling {tuning_fraction * 100:.1f}% of data from each ticker")
-    print("=" * 50)
-
-    # Prepare data for ALL tickers
-    all_tickers_data_info = prepare_combined_data(
-        tickers=TICKERS,  # Use all 50 tickers
-        start_date=training_config['start_date'],
-        end_date=training_config['end_date'],
-        look_back=tuning_config['look_back'],
+    # Prepare data for training tickers only (not all tickers)
+    train_data_info = prepare_combined_data(
+        tickers=train_tickers,  # Use only training tickers
+        start_date=START_DATE,
+        end_date=END_DATE,
+        look_back=LOOK_BACK,
         verbose=True
     )
 
-    # Combine datasets for ALL tickers
-    X_all, y_all = combine_datasets(all_tickers_data_info['data'])
-    print(f"Full dataset from all tickers: X={X_all.shape}, y={y_all.shape}")
+    # Combine datasets for training tickers only
+    X_train_all, y_train_all = combine_datasets(train_data_info['data'])
+    print(f"Full dataset from training tickers: X={X_train_all.shape}, y={y_train_all.shape}")
 
-    # For hyperparameter tuning, use only a subset of the data
-    if tuning_fraction < 1.0:
-        # Create a subset for tuning
-        X_tune_subset, _, y_tune_subset, _ = train_test_split(
-            X_all, y_all,
-            train_size=tuning_fraction,
-            shuffle=True,
-            random_state=RANDOM_SEED
-        )
+    # For hyperparameter tuning, use only a subset of the training data
+    X_tune_subset, _, y_tune_subset, _ = train_test_split(
+        X_train_all, y_train_all,
+        train_size=tuning_fraction,
+        shuffle=True,
+        random_state=RANDOM_SEED
+    )
 
-        print(f"Using {tuning_fraction * 100:.1f}% of ALL data for hyperparameter tuning")
-        print(f"Tuning dataset shape: X={X_tune_subset.shape}, y={y_tune_subset.shape}")
-    else:
-        # Use all data if fraction is 1.0
-        X_tune_subset, y_tune_subset = X_all, y_all
+    print(f"Using {tuning_fraction * 100:.1f}% of training tickers' data for hyperparameter tuning")
+    print(f"Tuning dataset shape: X={X_tune_subset.shape}, y={y_tune_subset.shape}")
 
     # Split tuning data into training and validation sets
     X_tune_train, X_tune_val, y_tune_train, y_tune_val = train_test_split(
@@ -597,149 +569,50 @@ def run_transfer_learning(tuning_fraction=TUNING_DATA_FRACTION):
     print("Tuning hyperparameters...")
 
     # Create a tuner for the combined dataset
-    tuner_class = tuning_config.get('tuner_class', 'RandomSearch')
-    input_shape = (tuning_config['look_back'], 1)
-
-    if tuner_class == 'RandomSearch':
-        tuner = kt.RandomSearch(
-            lambda hp: build_lstm_model(hp, input_shape),
-            objective='val_loss',
-            max_trials=tuning_config['max_trials'],
-            executions_per_trial=tuning_config['executions_per_trial'],
-            directory='hyper_tuning',
-            project_name='combined_lstm_tuning'
-        )
-    else:
-        # Default to RandomSearch if invalid tuner class
-        tuner = kt.RandomSearch(
-            lambda hp: build_lstm_model(hp, input_shape),
-            objective='val_loss',
-            max_trials=tuning_config['max_trials'],
-            executions_per_trial=tuning_config['executions_per_trial'],
-            directory='hyper_tuning',
-            project_name='combined_lstm_tuning'
-        )
+    tuner = kt.RandomSearch(
+        lambda hp: build_lstm_model(hp, (LOOK_BACK, 1)),
+        objective='val_loss',
+        max_trials=TUNING_MAX_TRIALS,
+        executions_per_trial=TUNING_EXECUTIONS_PER_TRIAL,
+        directory='hyper_tuning',
+        project_name='_full_model_tuning'
+    )
 
     # Search for best hyperparameters on the subset
     tuner.search(
         X_tune_train, y_tune_train,
         validation_data=(X_tune_val, y_tune_val),
-        epochs=tuning_config['epochs'],
-        batch_size=training_config['batch_size'],
+        epochs=TUNING_EPOCHS,
+        batch_size=BATCH_SIZE,
         verbose=True
     )
 
-    # Get the best hyperparameters
     best_hp = tuner.get_best_hyperparameters(num_trials=1)[0]
-
     print("\nBest Hyperparameters:")
     for param, value in best_hp.values.items():
         print(f"{param}: {value}")
 
-    # Step 2: Prepare full training data (90% of tickers)
-    print("\n" + "=" * 50)
-    print(f"TRAINING MODEL WITH BEST HYPERPARAMETERS")
-    print(
-        f"Using all {len(train_tickers)} training tickers ({(len(train_tickers) / len(TICKERS)) * 100:.1f}% of all tickers)")
-    print(f"Using 100% of the data from these training tickers")
-    print("=" * 50)
-
-    # Prepare full training data
-    combined_data_info = prepare_combined_data(
-        tickers=train_tickers,
-        start_date=training_config['start_date'],
-        end_date=training_config['end_date'],
-        look_back=tuning_config['look_back'],
-        verbose=True
-    )
-
-    # Combine all datasets for final training
-    X_combined, y_combined = combine_datasets(combined_data_info['data'])
-
-    print(f"Full training dataset shape: X={X_combined.shape}, y={y_combined.shape}")
-
-    # Build the model with best hyperparameters
-    model = build_lstm_model(best_hp, input_shape)
-
-    # Train the model on the entire combined dataset with the best hyperparameters
-    print("\nTraining final model on the FULL combined dataset...")
-
+    # Train final model on full training data
+    model = build_lstm_model(best_hp, (LOOK_BACK, 1))
+    print("\nTraining final model on the FULL training dataset...")
     history = model.fit(
-        X_combined, y_combined,
-        batch_size=training_config['batch_size'],
-        epochs=training_config['epochs'],
+        X_train_all, y_train_all,
+        batch_size=BATCH_SIZE,
+        epochs=TRAINING_EPOCHS,
         validation_split=TEST_SIZE,
         verbose=True
     )
 
-    combined_data_info['best_hyperparameters'] = best_hp.values
-    combined_data_info['history'] = history.history
-
-    # Step 3: Evaluate on test tickers
-    print("\n" + "=" * 50)
-    print("EVALUATING ON TEST TICKERS")
-    print("=" * 50)
-
+    # Evaluate on test tickers
+    print("\nEvaluating on test tickers...")
     test_results = evaluate_on_test_tickers(
         model=model,
         test_tickers=test_tickers,
-        combined_data_info=combined_data_info,
+        combined_data_info=train_data_info,
         verbose=True
     )
-
-    # Summarize results
-    print("\n" + "=" * 50)
-    print("TRANSFER LEARNING RESULTS SUMMARY")
-    print("=" * 50)
-
-    print("\nTest tickers ranked by Original RMSE (best to worst):")
-    ranked_tickers = sorted(test_results.keys(), key=lambda x: test_results[x]['metrics']['original_rmse'])
-
-    for i, ticker in enumerate(ranked_tickers):
-        norm_rmse = test_results[ticker]['metrics']['normalized_rmse']
-        orig_rmse = test_results[ticker]['metrics']['original_rmse']
-        print(f"{i + 1}. {ticker}: Normalized RMSE: {norm_rmse:.4f}, Original RMSE: {orig_rmse:.4f}")
-
-    if ranked_tickers:
-        avg_norm_rmse = sum(test_results[t]['metrics']['normalized_rmse'] for t in test_results) / len(test_results)
-        avg_orig_rmse = sum(test_results[t]['metrics']['original_rmse'] for t in test_results) / len(test_results)
-        print(f"\nAverage Normalized RMSE across all test tickers: {avg_norm_rmse:.4f}")
-        print(f"Average Original RMSE across all test tickers: {avg_orig_rmse:.4f}")
 
     return model, train_tickers, test_tickers, test_results
-
-    # Evaluate on test tickers
-    print("\n" + "=" * 50)
-    print("EVALUATING ON TEST TICKERS")
-    print("=" * 50)
-
-    test_results = evaluate_on_test_tickers(
-        model=base_model,
-        test_tickers=test_tickers,
-        combined_data_info=combined_data_info,
-        verbose=True
-    )
-
-    # Summarize results
-    print("\n" + "=" * 50)
-    print("TRANSFER LEARNING RESULTS SUMMARY")
-    print("=" * 50)
-
-    print("\nTest tickers ranked by Original RMSE (best to worst):")
-    ranked_tickers = sorted(test_results.keys(), key=lambda x: test_results[x]['metrics']['original_rmse'])
-
-    for i, ticker in enumerate(ranked_tickers):
-        norm_rmse = test_results[ticker]['metrics']['normalized_rmse']
-        orig_rmse = test_results[ticker]['metrics']['original_rmse']
-        print(f"{i + 1}. {ticker}: Normalized RMSE: {norm_rmse:.4f}, Original RMSE: {orig_rmse:.4f}")
-
-    if ranked_tickers:
-        avg_norm_rmse = sum(test_results[t]['metrics']['normalized_rmse'] for t in test_results) / len(test_results)
-        avg_orig_rmse = sum(test_results[t]['metrics']['original_rmse'] for t in test_results) / len(test_results)
-        print(f"\nAverage Normalized RMSE across all test tickers: {avg_norm_rmse:.4f}")
-        print(f"Average Original RMSE across all test tickers: {avg_orig_rmse:.4f}")
-
-    return base_model, train_tickers, test_tickers, test_results
 
 
 if __name__ == '__main__':
@@ -762,13 +635,8 @@ if __name__ == '__main__':
         # Compare with individual models
         compare_with_individual_models(test_tickers, test_results)
 
-        print(f"\nResults saved to {log_file}")
-        print(f"Plots saved to results/ directory")
     finally:
         # Restore stdout
         if isinstance(sys.stdout, StdoutRedirector):
             sys.stdout.close()
         sys.stdout = original_stdout
-
-    print(f"Results saved to {log_file}")
-    print(f"Plots saved to results/ directory")
