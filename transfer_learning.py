@@ -195,7 +195,7 @@ def train_base_model(train_tickers, verbose=True):
         max_trials=TUNING_MAX_TRIALS,
         executions_per_trial=TUNING_EXECUTIONS_PER_TRIAL,
         directory='hyper_tuning',
-        project_name='combined_lstm_tuning'
+        project_name='_combined_lstm_tuning'
     )
 
     # Search for best hyperparameters on the subset
