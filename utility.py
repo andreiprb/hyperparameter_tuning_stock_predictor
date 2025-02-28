@@ -1,5 +1,8 @@
 import numpy as np
 import tensorflow as tf
+import matplotlib.pyplot as plt
+import os
+import yfinance as yf
 
 
 def min_max_scale(data):
@@ -79,3 +82,123 @@ def split_train_test(X, y, test_ratio):
     y_train, y_test = y[:train_size], y[train_size:]
 
     return X_train, y_train, X_test, y_test
+
+
+def prepare_stock_data(ticker, start_date, end_date, look_back, test_ratio=0.05, verbose=False):
+    """
+    Centralized function to prepare stock data for model training.
+
+    This function:
+    1. Downloads stock data for the specified ticker
+    2. Normalizes the data
+    3. Creates time series sequences
+    4. Splits into training and test sets
+
+    Args:
+        ticker (str): Stock ticker symbol
+        start_date (str): Start date for data download (YYYY-MM-DD)
+        end_date (str): End date for data download (YYYY-MM-DD)
+        look_back (int): Number of previous time steps to use as input features
+        test_ratio (float, optional): Proportion of data to use for testing. Defaults to 0.05.
+        verbose (bool, optional): Whether to print progress information. Defaults to False.
+
+    Returns:
+        dict: Dictionary containing:
+            - data_splits: (X_train, y_train, X_test, y_test)
+            - scaling_info: (min_val, max_val)
+            - dates: Original data dates
+            - original_data: Original stock price data
+    """
+    if verbose:
+        print(f"Downloading data for {ticker} from {start_date} to {end_date}...")
+
+    data = yf.download(ticker, start=start_date, end=end_date, progress=verbose)
+
+    if data.empty or len(data) < look_back + 10:
+        if verbose:
+            print(f"Insufficient data for {ticker}")
+        return None
+
+    close_data = data[['Close']].dropna()
+    original_data = close_data.values
+    normalized_data, min_val, max_val = min_max_scale(original_data)
+
+    X, y = create_dataset(normalized_data, look_back)
+    X = X.reshape(X.shape[0], X.shape[1], 1)
+    X_train, y_train, X_test, y_test = split_train_test(X, y, test_ratio)
+
+    if verbose:
+        print(
+            f"Data prepared: X_train: {X_train.shape}, y_train: {y_train.shape}, X_test: {X_test.shape}, y_test: {y_test.shape}")
+
+    return {
+        'data_splits': (X_train, y_train, X_test, y_test),
+        'scaling_info': (min_val, max_val),
+        'dates': data.index,
+        'original_data': original_data
+    }
+
+
+def plot_results(ticker, results, save=False, transfer_learning=False):
+    """
+    Plot the results of model training and evaluation.
+
+    Args:
+        ticker (str): Stock ticker symbol.
+        results (dict): Dictionary containing model predictions, dates, and metrics.
+            Expected format:
+            {
+                'predictions': (train_preds_original, test_preds_original, y_train_original, y_test_original),
+                'dates': (train_dates, test_dates),
+                'metrics': {'original_rmse': float, 'normalized_rmse': float}
+            }
+        save (bool, optional): Whether to save the plot to a file. Defaults to False.
+        transfer_learning (bool, optional): Whether the plot is for a transfer learning model.
+                                           Defaults to False.
+
+    Returns:
+        None: Displays a plot showing real vs. predicted values for training and test data.
+    """
+    train_preds_original, test_preds_original, y_train_original, y_test_original = results['predictions']
+    train_dates, test_dates = results['dates']
+    metrics = results['metrics']
+
+    min_train_len = min(len(train_dates), len(y_train_original))
+    min_test_len = min(len(test_dates), len(y_test_original))
+
+    train_dates = train_dates[:min_train_len]
+    y_train_original = y_train_original[:min_train_len]
+    train_preds_original = train_preds_original[:min_train_len]
+
+    test_dates = test_dates[:min_test_len]
+    y_test_original = y_test_original[:min_test_len]
+    test_preds_original = test_preds_original[:min_test_len]
+
+    plt.figure(figsize=(16, 8))
+
+    if transfer_learning:
+        title = f'Transfer Learning LSTM Model - {ticker}\nNormalized RMSE: {metrics["normalized_rmse"]:.4f}, Original RMSE: {metrics["original_rmse"]:.4f}'
+    else:
+        title = f'LSTM Model - {ticker}\nNormalized RMSE: {metrics["normalized_rmse"]:.4f}, Original RMSE: {metrics["original_rmse"]:.4f}'
+
+    plt.title(title)
+    plt.xlabel('Date')
+    plt.ylabel('Closing Price USD ($)')
+
+    plt.plot(train_dates, y_train_original, color='black', label='Real - Train')
+    plt.plot(train_dates, train_preds_original, color='orange', label='Predicted - Train')
+
+    plt.plot(test_dates, y_test_original, color='black', label='Real - Test')
+    plt.plot(test_dates, test_preds_original, color='red', label='Predicted - Test')
+
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    if save:
+        results_dir = os.path.join(os.getcwd(), 'results')
+        os.makedirs(results_dir, exist_ok=True)
+
+        filename = f"{ticker}_transfer_learning.png" if transfer_learning else f"{ticker}_simple_training.png"
+        plt.savefig(os.path.join(results_dir, filename))
+
+    plt.show()
