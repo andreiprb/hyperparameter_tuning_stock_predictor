@@ -141,7 +141,8 @@ def prepare_stock_data(ticker, start_date, end_date, look_back, test_ratio=0.05,
 
 def plot_results(ticker, results, save=False, transfer_learning=False):
     """
-    Plot the results of model training and evaluation.
+    Plot the results of model training and evaluation with a continuous real data line.
+    For transfer learning mode, predicted data is shown as a single connected purple line.
 
     Args:
         ticker (str): Stock ticker symbol.
@@ -185,11 +186,32 @@ def plot_results(ticker, results, save=False, transfer_learning=False):
     plt.xlabel('Date')
     plt.ylabel('Closing Price USD ($)')
 
-    plt.plot(train_dates, y_train_original, color='black', label='Real - Train')
-    plt.plot(train_dates, train_preds_original, color='orange', label='Predicted - Train')
+    train_dates_list = train_dates.tolist() if hasattr(train_dates, 'tolist') else list(train_dates)
+    test_dates_list = test_dates.tolist() if hasattr(test_dates, 'tolist') else list(test_dates)
+    all_dates = train_dates_list + test_dates_list
 
-    plt.plot(test_dates, y_test_original, color='black', label='Real - Test')
-    plt.plot(test_dates, test_preds_original, color='red', label='Predicted - Test')
+    y_train_np = y_train_original.numpy() if hasattr(y_train_original, 'numpy') else y_train_original
+    y_test_np = y_test_original.numpy() if hasattr(y_test_original, 'numpy') else y_test_original
+
+    y_train_list = y_train_np.flatten().tolist() if hasattr(y_train_np, 'flatten') else list(y_train_np)
+    y_test_list = y_test_np.flatten().tolist() if hasattr(y_test_np, 'flatten') else list(y_test_np)
+
+    all_real_values = y_train_list + y_test_list
+    plt.plot(all_dates, all_real_values, color='gray', label='Real Data')
+
+    train_preds_np = train_preds_original.numpy() if hasattr(train_preds_original, 'numpy') else train_preds_original
+    test_preds_np = test_preds_original.numpy() if hasattr(test_preds_original, 'numpy') else test_preds_original
+
+    train_preds_flat = train_preds_np.flatten() if hasattr(train_preds_np, 'flatten') else train_preds_np
+    test_preds_flat = test_preds_np.flatten() if hasattr(test_preds_np, 'flatten') else test_preds_np
+
+    if transfer_learning:
+        all_pred_dates = train_dates_list + test_dates_list
+        all_pred_values = list(train_preds_flat) + list(test_preds_flat)
+        plt.plot(all_pred_dates, all_pred_values, color='skyblue', label='Predicted Data')
+    else:
+        plt.plot(train_dates, train_preds_flat, color='blue', label='Predicted - Train')
+        plt.plot(test_dates, test_preds_flat, color='skyblue', label='Predicted - Test')
 
     plt.legend()
     plt.grid(True, alpha=0.3)

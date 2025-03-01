@@ -27,4 +27,4 @@ TICKERS = ["AAPL", "ABBV", "ADBE", "AMD", "AMZN",
            "T", "TMO", "TSLA", "TXN", "UNH",
            "V", "VZ", "WMT", "XOM", "ZS"]
 
-DEFAULT_TICKER = "PFE"
+DEFAULT_TICKER = "BLK"
