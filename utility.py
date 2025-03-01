@@ -210,8 +210,8 @@ def plot_results(ticker, results, save=False, transfer_learning=False):
         all_pred_values = list(train_preds_flat) + list(test_preds_flat)
         plt.plot(all_pred_dates, all_pred_values, color='skyblue', label='Predicted Data')
     else:
-        plt.plot(train_dates, train_preds_flat, color='blue', label='Predicted - Train')
-        plt.plot(test_dates, test_preds_flat, color='skyblue', label='Predicted - Test')
+        plt.plot(train_dates, train_preds_flat, color='skyblue', label='Predicted - Train')
+        plt.plot(test_dates, test_preds_flat, color='blue', label='Predicted - Test')
 
     plt.legend()
     plt.grid(True, alpha=0.3)
